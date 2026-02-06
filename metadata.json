@@ -1,0 +1,7 @@
+{
+  "name": "Gemini DAW - FL Studio Clone",
+  "description": "A high-performance digital audio workstation clone featuring a step sequencer, mixer, and AI-powered pattern generation using Gemini.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
