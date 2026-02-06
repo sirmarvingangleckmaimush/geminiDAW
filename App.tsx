@@ -9,10 +9,11 @@ import {
   ChevronUp, ListMusic, MoreVertical, Settings2, BarChart3,
   Waves, Headphones, FileAudio, Keyboard, Download, RotateCcw,
   MessageSquare, Wand2, Power, Loader2, MousePointer, GripHorizontal,
-  Scissors, VolumeX, Eye, HelpCircle, Activity as WaveformIcon
+  Scissors, VolumeX, Eye, HelpCircle, Activity as WaveformIcon,
+  Mic2, Target, Move, Music2, File
 } from 'lucide-react';
 import { Track, SynthSettings, InstrumentType, FXSettings, PlaylistClip, PlaybackMode, PatternData, PianoNote, FXSlot } from './types';
-import { DRUM_SAMPLES, DEFAULT_BPM, TRACK_COLORS, PIANO_ROLL_NOTES } from './constants';
+import { DRUM_SAMPLES, DEFAULT_BPM, TRACK_COLORS, PIANO_ROLL_NOTES, SAMPLE_PACKS, SYNTH_PRESETS } from './constants';
 import { generatePattern, getMusicAdvice } from './services/geminiService';
 
 // --- Improved Utility Functions ---
@@ -27,7 +28,66 @@ const stepsToDuration = (steps: number): string => {
   if (steps <= 2) return '8n';
   if (steps <= 4) return '4n';
   if (steps <= 8) return '2n';
-  return '1n';
+  return '1n'; 
+};
+
+// --- Sub-Components ---
+
+const BrowserItem: React.FC<{ name: string, data: any, type: 'sample' | 'preset', onDoubleClick: () => void }> = ({ name, data, type, onDoubleClick }) => {
+  const handleDragStart = (e: React.DragEvent) => {
+     e.dataTransfer.setData('application/gemini-daw-item', JSON.stringify({ type, name, data }));
+     e.dataTransfer.effectAllowed = 'copy';
+  };
+
+  return (
+     <div 
+        draggable 
+        onDragStart={handleDragStart}
+        onDoubleClick={onDoubleClick}
+        className="group flex items-center gap-2 px-3 py-1.5 text-white/50 hover:text-white hover:bg-white/5 cursor-grab active:cursor-grabbing rounded transition-all select-none"
+     >
+        {type === 'sample' ? <FileAudio size={11} className="group-hover:text-orange-400" /> : <Zap size={11} className="group-hover:text-blue-400" />}
+        <span className="text-[10px] font-medium truncate">{name}</span>
+     </div>
+  );
+};
+
+const BrowserFolder: React.FC<{ name: string, children: React.ReactNode, depth?: number, defaultOpen?: boolean }> = ({ name, children, depth = 0, defaultOpen = false }) => {
+   const [isOpen, setIsOpen] = useState(defaultOpen);
+   return (
+      <div className="select-none">
+         <div 
+            onClick={() => setIsOpen(!isOpen)}
+            className={`flex items-center gap-2 px-2 py-1.5 hover:bg-white/5 cursor-pointer text-white/60 hover:text-white transition-colors rounded`}
+            style={{ paddingLeft: `${depth * 12 + 8}px` }}
+         >
+            {isOpen ? <ChevronDown size={11} className="text-white/40" /> : <ChevronRight size={11} className="text-white/40" />}
+            <Folder size={11} className={`${isOpen ? 'text-orange-500' : 'text-white/30'}`} />
+            <span className="text-[10px] font-bold uppercase tracking-wide">{name}</span>
+         </div>
+         {isOpen && <div className="border-l border-white/5 ml-3">{children}</div>}
+      </div>
+   );
+};
+
+const RecursiveBrowser = ({ data, depth = 0, onItemClick }: { data: any, depth?: number, onItemClick: (type: 'sample'|'preset', name: string, val: any) => void }) => {
+   return (
+      <div className="flex flex-col">
+         {Object.entries(data).map(([key, value]) => {
+            if (typeof value === 'string') {
+               return <BrowserItem key={key} name={key} data={value} type="sample" onDoubleClick={() => onItemClick('sample', key, value)} />;
+            } else if (value && typeof value === 'object' && 'type' in value && 'settings' in value) {
+               return <BrowserItem key={key} name={key} data={value} type="preset" onDoubleClick={() => onItemClick('preset', key, value)} />;
+            } else {
+               return (
+                  <BrowserFolder key={key} name={key} depth={depth}>
+                     <RecursiveBrowser data={value} depth={depth + 1} onItemClick={onItemClick} />
+                  </BrowserFolder>
+               );
+            }
+         })}
+      </div>
+   );
 };
 
 // --- Signature Components ---
@@ -135,7 +195,7 @@ const WindowFrame: React.FC<{
 
   return (
     <div 
-      className={`absolute bg-[#24282e]/95 backdrop-blur-md rounded-md shadow-2xl border border-black/60 overflow-hidden flex flex-col transition-all duration-200 ${active ? 'z-40 ring-1 ring-orange-500/40' : 'z-30 opacity-95'}`}
+      className={`absolute bg-[#24282e]/95 backdrop-blur-md rounded-md shadow-2xl border border-black/60 overflow-hidden flex flex-col transition-all duration-200 ${active ? 'z-40 ring-1 ring-orange-500/40 shadow-[0_0_30px_rgba(0,0,0,0.5)]' : 'z-30 opacity-95 grayscale-[0.3]'}`}
       style={{ left: pos.x, top: pos.y, width: width }}
       onMouseDown={() => onClick?.()}
     >
@@ -177,20 +237,39 @@ export default function App() {
   const [producerAdvice, setProducerAdvice] = useState<string>("Mastering is the bridge between a good track and a hit. Check your gain stages.");
   const [brushLength, setBrushLength] = useState(1);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+  const [showGraphEditor, setShowGraphEditor] = useState(false);
+  const [isMetronomeOn, setIsMetronomeOn] = useState(false);
+  const [chatInput, setChatInput] = useState("");
+  const [hoveredNoteIndex, setHoveredNoteIndex] = useState<number | null>(null);
+  const [dragOverTrackId, setDragOverTrackId] = useState<string | null>(null);
+
+  // Interaction State
+  const isPaintingRef = useRef(false);
+  const paintValueRef = useRef(true);
+  const dragRef = useRef<{ 
+    type: 'move' | 'resize'; 
+    noteId: string; 
+    trackId: string; 
+    startX: number; 
+    startY: number; 
+    initialStep: number; 
+    initialNoteIndex: number; 
+    initialLengthSteps: number; 
+  } | null>(null);
 
   const [tracks, setTracks] = useState<Track[]>(() => [
-    { id: '1', name: 'Kick Core', type: 'sampler', sampleUrl: DRUM_SAMPLES.kick, patterns: { 1: { id: 1, name: 'Pattern 1', steps: [true, false, false, false, true, false, false, false, true, false, false, false, true, false, false, false], notes: [], color: TRACK_COLORS[0] } }, fx: { reverb: { enabled: false, roomSize: 0.5, dampening: 3000 }, delay: { enabled: false, delayTime: '8n', feedback: 0.3 } }, fxSlots: [], volume: 1.0, pan: 0, muted: false, color: TRACK_COLORS[0], mixerTrack: 1 },
-    { id: '2', name: 'Acid 303', type: 'acid', patterns: { 1: { id: 1, name: 'Acid Line', steps: Array(16).fill(false), notes: [{ id: 'n1', note: 'C2', step: 0, length: '16n', velocity: 1 }, { id: 'n2', note: 'C3', step: 4, length: '16n', velocity: 1 }], color: TRACK_COLORS[6] } }, synthSettings: { oscillator: 'sawtooth', envelope: { attack: 0.01, decay: 0.2, sustain: 0.1, release: 0.1 }, filter: { frequency: 1200, resonance: 15, type: 'lowpass' } }, fx: { reverb: { enabled: false, roomSize: 0.5, dampening: 3000 }, delay: { enabled: true, delayTime: '8n', feedback: 0.3 } }, fxSlots: [], volume: 0.7, pan: 0, muted: false, color: TRACK_COLORS[6], mixerTrack: 2 },
+    { id: '1', name: 'Kick Core', type: 'sampler', sampleUrl: DRUM_SAMPLES.kick, patterns: { 1: { id: 1, name: 'Pattern 1', steps: [true, false, false, false, true, false, false, false, true, false, false, false, true, false, false, false], velocities: Array(16).fill(0.8), notes: [], color: TRACK_COLORS[0] } }, fx: { reverb: { enabled: false, roomSize: 0.5, dampening: 3000 }, delay: { enabled: false, delayTime: '8n', feedback: 0.3 } }, fxSlots: [], volume: 1.0, pan: 0, muted: false, solo: false, color: TRACK_COLORS[0], mixerTrack: 1 },
+    { id: '2', name: 'Acid 303', type: 'acid', patterns: { 1: { id: 1, name: 'Acid Line', steps: Array(16).fill(false), velocities: Array(16).fill(0.8), notes: [{ id: 'n1', note: 'C2', step: 0, length: '16n', velocity: 1 }, { id: 'n2', note: 'C3', step: 4, length: '16n', velocity: 1 }], color: TRACK_COLORS[6] } }, synthSettings: { oscillator: 'sawtooth', envelope: { attack: 0.01, decay: 0.2, sustain: 0.1, release: 0.1 }, filter: { frequency: 1200, resonance: 15, type: 'lowpass' } }, fx: { reverb: { enabled: false, roomSize: 0.5, dampening: 3000 }, delay: { enabled: true, delayTime: '8n', feedback: 0.3 } }, fxSlots: [], volume: 0.7, pan: 0, muted: false, solo: false, color: TRACK_COLORS[6], mixerTrack: 2 },
   ]);
 
   const selectedTrack = useMemo(() => tracks.find(t => t.id === selectedTrackId), [tracks, selectedTrackId]);
 
   const samplersRef = useRef<{ [key: string]: any }>({});
   const fxNodesRef = useRef<{ [key: string]: any }>({});
-  const masterRef = useRef<{ analyzer: Tone.Analyser, meter: Tone.Meter } | null>(null);
+  const masterRef = useRef<{ analyzer: Tone.Analyser, meter: Tone.Meter, limiter: Tone.Limiter } | null>(null);
+  const metronomeRef = useRef<Tone.MetalSynth | null>(null);
   const transportIdRef = useRef<number | null>(null);
   
-  // Refs for Scroll Sync
   const pianoKeysRef = useRef<HTMLDivElement>(null);
   const pianoGridRef = useRef<HTMLDivElement>(null);
 
@@ -198,6 +277,57 @@ export default function App() {
   const [masterWaveform, setMasterWaveform] = useState<Float32Array>(new Float32Array(0));
   const tracksRef = useRef(tracks);
   useEffect(() => { tracksRef.current = tracks; }, [tracks]);
+
+  // --- Global Listeners ---
+  useEffect(() => {
+     const onMouseUp = () => { 
+        isPaintingRef.current = false; 
+        dragRef.current = null;
+     };
+     const onMouseMove = (e: MouseEvent) => {
+        if (!dragRef.current || !selectedTrackId || !pianoGridRef.current) return;
+        
+        const { type, noteId, startX, startY, initialStep, initialNoteIndex, initialLengthSteps } = dragRef.current;
+        const rect = pianoGridRef.current.getBoundingClientRect();
+        const stepWidth = rect.width / 16;
+        const rowHeight = 28;
+
+        const deltaX = e.clientX - startX;
+        const deltaY = e.clientY - startY;
+
+        const stepDelta = Math.round(deltaX / stepWidth);
+        const noteIndexDelta = Math.round(deltaY / rowHeight);
+
+        setTracks(prev => prev.map(t => {
+           if (t.id !== selectedTrackId) return t;
+           const pat = t.patterns[currentPatternId];
+           if (!pat) return t;
+           
+           const updatedNotes = pat.notes.map(n => {
+              if (n.id !== noteId) return n;
+              
+              if (type === 'move') {
+                 let newStep = Math.max(0, Math.min(15, initialStep + stepDelta));
+                 let newIndex = Math.max(0, Math.min(PIANO_ROLL_NOTES.length - 1, initialNoteIndex + noteIndexDelta));
+                 return { ...n, step: newStep, note: PIANO_ROLL_NOTES[newIndex] };
+              } else if (type === 'resize') {
+                 let newLenSteps = Math.max(1, Math.min(16 - n.step, initialLengthSteps + stepDelta));
+                 return { ...n, length: stepsToDuration(newLenSteps) };
+              }
+              return n;
+           });
+           
+           return { ...t, patterns: { ...t.patterns, [currentPatternId]: { ...pat, notes: updatedNotes } } };
+        }));
+     };
+
+     window.addEventListener('mouseup', onMouseUp);
+     window.addEventListener('mousemove', onMouseMove);
+     return () => {
+        window.removeEventListener('mouseup', onMouseUp);
+        window.removeEventListener('mousemove', onMouseMove);
+     };
+  }, [selectedTrackId, currentPatternId]);
 
   // --- Audio Engine Sync ---
   useEffect(() => {
@@ -208,35 +338,65 @@ export default function App() {
     Tone.Transport.swing = swing;
   }, [swing]);
 
+  // --- Global Shortcuts ---
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        e.preventDefault();
+        startPlayback();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isPlaying]);
+
   // --- Audio Setup ---
   useEffect(() => {
     if (!masterRef.current) {
+      const limiter = new Tone.Limiter(-1).toDestination();
       const analyzer = new Tone.Analyser("waveform", 256);
       const meter = new Tone.Meter();
-      Tone.Destination.chain(analyzer, meter);
-      masterRef.current = { analyzer, meter };
+      analyzer.connect(meter);
+      meter.connect(limiter);
+      masterRef.current = { analyzer, meter, limiter };
+
+      const metroSynth = new Tone.MetalSynth({
+         envelope: { attack: 0.001, decay: 0.1, release: 0.01 },
+         harmonicity: 5.1,
+         modulationIndex: 32,
+         resonance: 4000,
+         octaves: 1.5
+      }).toDestination();
+      metroSynth.volume.value = -12;
+      metronomeRef.current = metroSynth;
     }
   }, []);
 
   useEffect(() => {
     const initTracks = async () => {
+      if (!masterRef.current) return;
+
       const promises = tracks.map(async track => {
         if (!fxNodesRef.current[track.id]) {
           const meter = new Tone.Meter();
           const revMeter = new Tone.Meter();
           const delMeter = new Tone.Meter();
-          const reverb = new Tone.Reverb({ decay: 2.5, wet: 0 }).toDestination();
+          const reverb = new Tone.Reverb({ decay: 2.5, wet: 0 }).connect(masterRef.current!.analyzer);
           const revProxy = new Tone.Gain(1).connect(reverb).connect(revMeter);
           const delay = new Tone.FeedbackDelay({ delayTime: '8n', feedback: 0.4, wet: 0 }).connect(revProxy);
           const delProxy = new Tone.Gain(1).connect(delay).connect(delMeter);
           const filter = new Tone.Filter(2000, "lowpass").connect(delProxy);
           const panner = new Tone.Panner(0).connect(filter);
           const gain = new Tone.Gain(1).connect(panner).connect(meter);
+          gain.connect(masterRef.current!.analyzer);
           fxNodesRef.current[track.id] = { gain, panner, reverb, delay, filter, meter, revMeter, delMeter };
         }
         
         const fx = fxNodesRef.current[track.id];
-        fx.gain.gain.rampTo(track.muted ? 0 : track.volume, 0.05);
+        const anySolo = tracksRef.current.some(t => t.solo);
+        const shouldMute = track.muted || (anySolo && !track.solo);
+
+        fx.gain.gain.rampTo(shouldMute ? 0 : track.volume, 0.05);
         fx.panner.pan.rampTo(track.pan, 0.05);
         fx.reverb.wet.rampTo(track.fx.reverb.enabled ? 0.35 : 0, 0.1);
         fx.delay.wet.rampTo(track.fx.delay.enabled ? 0.25 : 0, 0.1);
@@ -300,15 +460,11 @@ export default function App() {
     if (!selectedTrackId || !samplersRef.current[selectedTrackId]) return;
     const instr = samplersRef.current[selectedTrackId];
     if (instr instanceof Tone.Sampler && !instr.loaded) return;
-    
-    if (instr.triggerAttackRelease) {
-      instr.triggerAttackRelease(note, '16n');
-    }
+    if (instr.triggerAttackRelease) instr.triggerAttackRelease(note, '16n');
   };
 
   const startPlayback = useCallback(async () => {
     if (Tone.getContext().state !== 'running') await Tone.start();
-    
     setIsAssetsLoading(true);
     try { await Tone.loaded(); } catch (e) {}
     setIsAssetsLoading(false);
@@ -334,11 +490,17 @@ export default function App() {
           setCurrentBar(barIndex);
         }, time);
 
+        if (isMetronomeOn && metronomeRef.current && (localStep % 4 === 0)) {
+           metronomeRef.current.triggerAttackRelease(localStep === 0 ? "C6" : "C5", "32n", time);
+        }
+
         tracksRef.current.forEach(track => {
           if (track.muted) return;
+           const anySolo = tracksRef.current.some(t => t.solo);
+           if (anySolo && !track.solo) return;
+
           const instr = samplersRef.current[track.id];
           if (!instr) return;
-          
           if (instr instanceof Tone.Sampler && !instr.loaded) return;
 
           let pattern: PatternData | undefined;
@@ -351,10 +513,11 @@ export default function App() {
 
           if (pattern) {
             if (pattern.steps[localStep]) {
-              instr.triggerAttackRelease("C3", "16n", time);
+              const velocity = pattern.velocities?.[localStep] ?? 0.8;
+              instr.triggerAttackRelease("C3", "16n", time, velocity);
             }
             pattern.notes.filter(n => n.step === localStep).forEach(n => {
-              instr.triggerAttackRelease(n.note, n.length, time);
+              instr.triggerAttackRelease(n.note, n.length, time, n.velocity);
             });
           }
         });
@@ -363,16 +526,25 @@ export default function App() {
       Tone.Transport.start();
       setIsPlaying(true);
     }
-  }, [isPlaying, playbackMode, playlistClips, currentPatternId, bpm, swing]);
+  }, [isPlaying, playbackMode, playlistClips, currentPatternId, bpm, swing, isMetronomeOn]);
 
-  const addTrack = (type: InstrumentType, name: string, url?: string) => {
+  const addTrack = (type: InstrumentType, name: string, url?: string, settings?: any) => {
     const id = Math.random().toString(36).substr(2, 9);
     const newTrack: Track = {
       id, name, type, sampleUrl: url,
-      patterns: { [currentPatternId]: { id: currentPatternId, name: 'Pattern 1', steps: Array(16).fill(false), notes: [], color: TRACK_COLORS[tracks.length % TRACK_COLORS.length] } },
+      patterns: { 
+        [currentPatternId]: { 
+          id: currentPatternId, 
+          name: 'Pattern 1', 
+          steps: Array(16).fill(false), 
+          velocities: Array(16).fill(0.8),
+          notes: [], 
+          color: TRACK_COLORS[tracks.length % TRACK_COLORS.length] 
+        } 
+      },
       fx: { reverb: { enabled: false, roomSize: 0.5, dampening: 3000 }, delay: { enabled: false, delayTime: '8n', feedback: 0.3 } },
-      synthSettings: type !== 'sampler' ? { oscillator: 'sawtooth', envelope: { attack: 0.01, decay: 0.3, sustain: 0.1, release: 0.1 }, filter: { frequency: 1500, resonance: 5, type: 'lowpass' } } : undefined,
-      fxSlots: [], volume: 0.8, pan: 0, muted: false, color: TRACK_COLORS[tracks.length % TRACK_COLORS.length], mixerTrack: tracks.length + 1
+      synthSettings: settings || (type !== 'sampler' ? { oscillator: 'sawtooth', envelope: { attack: 0.01, decay: 0.3, sustain: 0.1, release: 0.1 }, filter: { frequency: 1500, resonance: 5, type: 'lowpass' } } : undefined),
+      fxSlots: [], volume: 0.8, pan: 0, muted: false, solo: false, color: TRACK_COLORS[tracks.length % TRACK_COLORS.length], mixerTrack: tracks.length + 1
     };
     setTracks(p => [...p, newTrack]);
     setSelectedTrackId(id);
@@ -389,16 +561,115 @@ export default function App() {
     }));
   };
 
-  const handleMasteringReview = async () => {
-    setHint("Gemini is analyzing your synth layers...");
-    const prompt = `Review my current project: 
+  const updateVelocity = (trackId: string, stepIndex: number, velocity: number) => {
+    setTracks(p => p.map(t => {
+      if (t.id !== trackId) return t;
+      const pat = t.patterns[currentPatternId];
+      const velocities = [...(pat.velocities || Array(16).fill(0.8))];
+      velocities[stepIndex] = velocity;
+      return { ...t, patterns: { ...t.patterns, [currentPatternId]: { ...pat, velocities } } };
+    }));
+  };
+
+  const handleMasteringReview = async (query?: string) => {
+    setHint("Gemini is analyzing...");
+    const baseContext = `Project Context: 
       Tracks: ${tracks.map(t => `${t.name} (Type: ${t.type}, Vol: ${t.volume.toFixed(2)})`).join(', ')}.
-      Current BPM: ${bpm}.
-      Advice focus: Synth character and mix depth. 
-      Give a brutal produce advice.`;
+      Current BPM: ${bpm}.`;
+    
+    const prompt = query ? `${baseContext} User Question: ${query}` : `${baseContext} Advice focus: Synth character and mix depth. Give brutal producer advice.`;
+    
     const advice = await getMusicAdvice(prompt);
     setProducerAdvice(advice);
     setHint("AI Producers advice received.");
+  };
+
+  const toggleStep = (trackId: string, stepIndex: number, forceValue?: boolean) => {
+    setTracks(p => p.map(t => {
+      if (t.id !== trackId) return t;
+      const pat = t.patterns[currentPatternId];
+      const steps = [...pat.steps];
+      steps[stepIndex] = forceValue !== undefined ? forceValue : !steps[stepIndex];
+      return { ...t, patterns: { ...t.patterns, [currentPatternId]: { ...pat, steps } } };
+    }));
+  };
+
+  const scrubTimeline = (bar: number) => {
+      const time = Tone.Time(`${bar}:0:0`).toSeconds();
+      Tone.Transport.seconds = time;
+      setCurrentBar(bar);
+      setCurrentStep(0);
+  };
+
+  const initPianoDrag = (e: React.MouseEvent, type: 'move' | 'resize', note: PianoNote) => {
+     e.stopPropagation();
+     setSelectedNoteId(note.id);
+     triggerPreview(note.note);
+     if (selectedTrackId) {
+        dragRef.current = {
+           type,
+           noteId: note.id,
+           trackId: selectedTrackId,
+           startX: e.clientX,
+           startY: e.clientY,
+           initialStep: note.step,
+           initialNoteIndex: PIANO_ROLL_NOTES.indexOf(note.note),
+           initialLengthSteps: durationToSteps(note.length)
+        };
+     }
+  };
+
+  const handleDrop = async (e: React.DragEvent, trackId?: string) => {
+    e.preventDefault();
+    setDragOverTrackId(null);
+    const dataStr = e.dataTransfer.getData('application/gemini-daw-item');
+    if (!dataStr) return;
+    
+    try {
+      const { type, name, data } = JSON.parse(dataStr);
+      
+      if (trackId) {
+        // Replace existing track content
+        setTracks(prev => prev.map(t => {
+          if (t.id !== trackId) return t;
+          
+          // Clear current tone instrument instance to force reload
+          if (samplersRef.current[t.id]) {
+            samplersRef.current[t.id].dispose();
+            delete samplersRef.current[t.id];
+          }
+
+          if (type === 'sample') {
+            return {
+              ...t,
+              name: name,
+              type: 'sampler',
+              sampleUrl: data,
+              synthSettings: undefined
+            };
+          } else if (type === 'preset') {
+             return {
+               ...t,
+               name: name,
+               type: data.type,
+               synthSettings: data.settings,
+               sampleUrl: undefined
+             };
+          }
+          return t;
+        }));
+        setHint(`Replaced Channel ${trackId} with ${name}`);
+      } else {
+        // Add new track
+        if (type === 'sample') {
+           addTrack('sampler', name, data);
+        } else if (type === 'preset') {
+           addTrack(data.type, name, undefined, data.settings);
+        }
+      }
+    } catch (e) {
+      console.error("Drop failed", e);
+    }
   };
 
   return (
@@ -424,6 +695,10 @@ export default function App() {
           <div className="flex items-center gap-4 px-4 border-l border-white/5 h-9">
             <button disabled={isAssetsLoading} onClick={startPlayback} className={`w-9 h-9 rounded-full flex items-center justify-center transition-all ${isPlaying ? 'bg-orange-500 text-black shadow-[0_0_15px_rgba(249,115,22,0.6)]' : 'bg-white/5 text-white/30 hover:bg-white/10'} ${isAssetsLoading ? 'opacity-30 cursor-wait' : ''}`}>
               {isAssetsLoading ? <Loader2 size={16} className="animate-spin" /> : isPlaying ? <Square size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" className="translate-x-0.5" />}
+            </button>
+
+            <button onClick={() => setIsMetronomeOn(!isMetronomeOn)} className={`w-8 h-8 rounded flex items-center justify-center transition-all ${isMetronomeOn ? 'bg-blue-500/20 text-blue-400 border border-blue-500/50' : 'text-white/20 hover:text-white hover:bg-white/5'}`} title="Metronome">
+               <Target size={16} />
             </button>
             
             <LCD label="Tempo" value={Math.round(bpm)} unit="BPM" />
@@ -489,41 +764,23 @@ export default function App() {
         {ui.browser && (
           <aside className="w-60 bg-[#1c1e22] border-r border-black flex flex-col z-50 shadow-2xl animate-in slide-in-from-left duration-200">
             <div className="p-3.5 border-b border-black flex items-center justify-between bg-black/20">
-              <span className="font-black text-white/40 uppercase tracking-[0.2em] text-[10px]">Library</span>
+              <span className="font-black text-white/40 uppercase tracking-[0.2em] text-[10px]">Browser</span>
               <Folder size={14} className="text-white/20" />
             </div>
             
             <div className="flex-1 overflow-y-auto p-2.5 space-y-4 custom-scrollbar">
                <div className="space-y-1">
-                 <div className="flex items-center gap-2 text-white/60 px-2 py-1.5 rounded hover:bg-white/5 cursor-pointer">
-                    <ChevronDown size={12} className="text-orange-500" />
-                    <span className="text-[10px] font-black uppercase tracking-wider">Drum Packs</span>
-                 </div>
-                 <div className="pl-4 space-y-0.5">
-                    {Object.keys(DRUM_SAMPLES).map(s => (
-                      <div key={s} onClick={() => addTrack('sampler', `FL ${s.toUpperCase()}`, (DRUM_SAMPLES as any)[s])} 
-                           className="text-white/30 hover:text-orange-400 hover:bg-white/5 rounded px-2 py-1 cursor-pointer flex items-center gap-2 text-[10px] transition-all group">
-                        <Disc size={11} className="group-hover:rotate-180 transition-transform duration-500" /> {s.toUpperCase()}
-                      </div>
-                    ))}
-                 </div>
-               </div>
-
-               <div className="space-y-1">
-                 <div className="flex items-center gap-2 text-white/60 px-2 py-1.5 rounded hover:bg-white/5 cursor-pointer">
-                    <ChevronDown size={12} className="text-blue-500" />
-                    <span className="text-[10px] font-black uppercase tracking-wider">Instruments</span>
-                 </div>
-                 <div className="pl-4 space-y-0.5">
-                    <div onClick={() => addTrack('acid', 'Acid 303')} className="text-white/30 hover:text-blue-400 hover:bg-white/5 rounded px-2 py-1 cursor-pointer flex items-center gap-2 text-[10px] transition-all"><Zap size={11} /> Acid 303</div>
-                    <div onClick={() => addTrack('synth', 'Power Lead')} className="text-white/30 hover:text-blue-400 hover:bg-white/5 rounded px-2 py-1 cursor-pointer flex items-center gap-2 text-[10px] transition-all"><Activity size={11} /> Power Lead</div>
-                    <div onClick={() => addTrack('synth', 'Space Pad')} className="text-white/30 hover:text-blue-400 hover:bg-white/5 rounded px-2 py-1 cursor-pointer flex items-center gap-2 text-[10px] transition-all"><Waves size={11} /> Space Pad</div>
-                 </div>
+                 <BrowserFolder name="Sample Packs" defaultOpen>
+                     <RecursiveBrowser data={SAMPLE_PACKS} onItemClick={(t, n, d) => addTrack('sampler', n, d)} />
+                 </BrowserFolder>
+                 <BrowserFolder name="Synth Presets" defaultOpen>
+                     <RecursiveBrowser data={SYNTH_PRESETS} onItemClick={(t, n, d) => addTrack(d.type, n, undefined, d.settings)} />
+                 </BrowserFolder>
                </div>
             </div>
 
             <div className="p-4 bg-black/40 border-t border-black">
-               <button onClick={handleMasteringReview} className="w-full py-2 bg-blue-600/10 border border-blue-500/30 rounded text-blue-400 text-[9px] font-black uppercase hover:bg-blue-600/20 transition-all flex items-center justify-center gap-2">
+               <button onClick={() => handleMasteringReview()} className="w-full py-2 bg-blue-600/10 border border-blue-500/30 rounded text-blue-400 text-[9px] font-black uppercase hover:bg-blue-600/20 transition-all flex items-center justify-center gap-2">
                  <Cpu size={14} /> Analyze Synth Layering
                </button>
             </div>
@@ -552,7 +809,7 @@ export default function App() {
                   <div className="flex-1 overflow-auto custom-scrollbar relative grid-pattern">
                      <div className="sticky top-0 h-7 bg-[#1c1e22]/90 border-b border-black flex z-30 shadow-md">
                         {Array.from({ length: 16 }).map((_, i) => (
-                          <div key={i} className={`flex-1 border-r border-black/50 flex items-center justify-center text-[8px] font-black ${isPlaying && currentBar === i ? 'text-orange-500' : 'text-white/10'}`}>{i + 1}</div>
+                          <div key={i} onClick={() => scrubTimeline(i)} className={`flex-1 border-r border-black/50 flex items-center justify-center text-[8px] font-black cursor-pointer hover:bg-white/5 ${isPlaying && currentBar === i ? 'text-orange-500' : 'text-white/10'}`}>{i + 1}</div>
                         ))}
                      </div>
                      <div className="flex flex-col relative z-10">
@@ -608,6 +865,10 @@ export default function App() {
                       <div key={track.id} onClick={() => setSelectedTrackId(track.id)} className={`w-16 flex flex-col items-center py-4 border border-black transition-all cursor-pointer rounded flex-shrink-0 ${selectedTrackId === track.id ? 'bg-[#3b3f46] shadow-xl' : 'bg-[#1c1e22] hover:bg-white/5'}`}>
                          <VUMeter value={meters[track.id] || 0} color={track.color} height={160} />
                          <div className="flex-1 flex flex-col items-center justify-end py-2 gap-2 relative w-full px-2">
+                             <div className="flex gap-1 mb-2">
+                               <button onClick={() => setTracks(p => p.map(t => t.id === track.id ? {...t, muted: !t.muted} : t))} className={`w-4 h-4 rounded text-[8px] font-black ${track.muted ? 'bg-red-500 text-black' : 'bg-white/10 text-white/30'}`}>M</button>
+                               <button onClick={() => setTracks(p => p.map(t => t.id === track.id ? {...t, solo: !t.solo} : t))} className={`w-4 h-4 rounded text-[8px] font-black ${track.solo ? 'bg-green-500 text-black' : 'bg-white/10 text-white/30'}`}>S</button>
+                             </div>
                             <input 
                               type="range" min="0" max="1.5" step="0.01" 
                               value={track.volume} 
@@ -680,49 +941,102 @@ export default function App() {
               active={focusedWindow === 'rack'} onClick={() => setFocusedWindow('rack')}>
                <div className="p-4 space-y-3 bg-[#2d3238]/50 max-h-[400px] overflow-y-auto custom-scrollbar no-drag">
                   {tracks.map((track) => (
-                    <div key={track.id} className={`flex items-center gap-4 bg-[#1c1e22] p-2.5 rounded border border-black/40 group hover:border-orange-500/30 transition-all shadow-lg`}>
-                       <div className="flex items-center gap-2 w-48">
-                          <div className="flex items-center gap-1.5">
-                             <FruityKnob label="PAN" value={track.pan} min={-1} max={1} onChange={v => setTracks(p => p.map(t => t.id === track.id ? {...t, pan: v} : t))} size={18} />
-                             <FruityKnob label="VOL" value={track.volume} min={0} max={1.5} onChange={v => setTracks(p => p.map(t => t.id === track.id ? {...t, volume: v} : t))} size={18} />
-                          </div>
-                          <div className="flex flex-col min-w-0 flex-1 ml-2" onClick={() => setSelectedTrackId(track.id)}>
-                            <span className={`font-black truncate uppercase text-[10px] transition-colors cursor-pointer ${selectedTrackId === track.id ? 'text-orange-400' : 'text-white/40 group-hover:text-white/70'}`}>{track.name}</span>
-                            <div className="flex items-center gap-2">
-                               <div className="w-2 h-2 rounded-full" style={{ backgroundColor: track.muted ? '#444' : track.color, boxShadow: track.muted ? 'none' : `0 0 8px ${track.color}88` }} />
-                               <span className="text-[6px] text-white/10 tracking-[0.2em] font-mono">INS {track.mixerTrack}</span>
+                    <div 
+                        key={track.id} 
+                        className="flex flex-col gap-1"
+                        onDragOver={(e) => { e.preventDefault(); setDragOverTrackId(track.id); }}
+                        onDragLeave={() => setDragOverTrackId(null)}
+                        onDrop={(e) => handleDrop(e, track.id)}
+                    >
+                      <div className={`flex items-center gap-4 bg-[#1c1e22] p-2.5 rounded border ${dragOverTrackId === track.id ? 'border-orange-500 bg-orange-500/5' : 'border-black/40'} group hover:border-orange-500/30 transition-all shadow-lg`}>
+                         <div className="flex items-center gap-2 w-48">
+                            <div className="flex items-center gap-1.5">
+                               <FruityKnob label="PAN" value={track.pan} min={-1} max={1} onChange={v => setTracks(p => p.map(t => t.id === track.id ? {...t, pan: v} : t))} size={18} />
+                               <FruityKnob label="VOL" value={track.volume} min={0} max={1.5} onChange={v => setTracks(p => p.map(t => t.id === track.id ? {...t, volume: v} : t))} size={18} />
                             </div>
-                          </div>
-                       </div>
-                       <div className="flex-1 grid grid-cols-16 gap-1">
-                          {track.patterns[currentPatternId]?.steps.map((s, i) => (
-                            <button 
-                              key={i} 
-                              onClick={() => {
-                                setTracks(p => p.map(t => {
-                                  if (t.id !== track.id) return t;
-                                  const pat = t.patterns[currentPatternId];
-                                  const steps = [...pat.steps];
-                                  steps[i] = !steps[i];
-                                  return { ...t, patterns: { ...t.patterns, [currentPatternId]: { ...pat, steps } } };
-                                }));
-                              }}
-                              className={`h-7 rounded-sm border border-black/80 transition-all ${isPlaying && currentStep === i ? 'brightness-150 scale-105 z-10 border-white/20' : ''}`}
-                              style={{ backgroundColor: s ? track.color : (Math.floor(i / 4) % 2 === 0 ? '#444c56' : '#2d333b') }}
-                            />
-                          ))}
-                       </div>
-                       <button onClick={() => { setSelectedTrackId(track.id); setUi(u => ({...u, piano: true})); }} className="p-2 opacity-0 group-hover:opacity-100 bg-white/5 rounded text-white/30 hover:text-white hover:bg-white/10 transition-all"><Piano size={14}/></button>
+                            <div className="flex flex-col min-w-0 flex-1 ml-2" onClick={() => setSelectedTrackId(track.id)}>
+                              <span className={`font-black truncate uppercase text-[10px] transition-colors cursor-pointer ${selectedTrackId === track.id ? 'text-orange-400' : 'text-white/40 group-hover:text-white/70'}`}>{track.name}</span>
+                              <div className="flex items-center gap-2">
+                                 <button onClick={() => setTracks(p => p.map(t => t.id === track.id ? {...t, muted: !t.muted} : t))} className={`w-3 h-3 rounded-full ${track.muted ? 'bg-white/20' : 'bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.5)]'}`} />
+                                 <span className="text-[6px] text-white/10 tracking-[0.2em] font-mono">INS {track.mixerTrack}</span>
+                              </div>
+                            </div>
+                         </div>
+                         <div className="flex-1 grid grid-cols-16 gap-1" onMouseLeave={() => isPaintingRef.current = false}>
+                            {track.patterns[currentPatternId]?.steps.map((s, i) => (
+                              <button 
+                                key={i} 
+                                onMouseDown={(e) => {
+                                   if (e.button === 0) { // Left click only
+                                      isPaintingRef.current = true;
+                                      paintValueRef.current = !s;
+                                      toggleStep(track.id, i);
+                                   }
+                                }}
+                                onMouseEnter={() => {
+                                   if (isPaintingRef.current) {
+                                      toggleStep(track.id, i, paintValueRef.current);
+                                   }
+                                }}
+                                className={`h-7 rounded-sm border border-black/80 transition-all shadow-inner relative overflow-hidden ${isPlaying && currentStep === i ? 'brightness-150 scale-105 z-10 border-white/20' : ''}`}
+                                style={{ backgroundColor: s ? track.color : (Math.floor(i / 4) % 2 === 0 ? '#444c56' : '#2d333b') }}
+                              >
+                                {s && <div className="absolute inset-2 bg-white/20 blur-sm rounded-full" />}
+                              </button>
+                            ))}
+                         </div>
+                         <button onClick={() => { setSelectedTrackId(track.id); setUi(u => ({...u, piano: true})); }} className="p-2 opacity-0 group-hover:opacity-100 bg-white/5 rounded text-white/30 hover:text-white hover:bg-white/10 transition-all"><Piano size={14}/></button>
+                      </div>
+                      
+                      {/* Velocity Graph Editor - Shown if Graph Editor Toggle is Active */}
+                      {showGraphEditor && (
+                        <div className="pl-48 pr-12 pb-2 grid grid-cols-16 gap-1 h-12 animate-in slide-in-from-top-1 duration-200">
+                          {track.patterns[currentPatternId]?.steps.map((s, i) => {
+                             const velocity = track.patterns[currentPatternId].velocities?.[i] ?? 0.8;
+                             return (
+                              <div key={i} className="relative bg-black/20 rounded-sm overflow-hidden group/vel cursor-ns-resize"
+                                   onMouseMove={(e) => {
+                                      if (e.buttons === 1) {
+                                         const rect = e.currentTarget.getBoundingClientRect();
+                                         const y = Math.max(0, Math.min(1, 1 - (e.clientY - rect.top) / rect.height));
+                                         updateVelocity(track.id, i, y);
+                                      }
+                                   }}
+                                   onMouseDown={(e) => {
+                                         const rect = e.currentTarget.getBoundingClientRect();
+                                         const y = Math.max(0, Math.min(1, 1 - (e.clientY - rect.top) / rect.height));
+                                         updateVelocity(track.id, i, y);
+                                   }}
+                              >
+                                <div className={`absolute bottom-0 w-full transition-all ${s ? 'opacity-80' : 'opacity-30'}`} 
+                                     style={{ height: `${velocity * 100}%`, backgroundColor: track.color }} />
+                              </div>
+                             )
+                          })}
+                        </div>
+                      )}
                     </div>
                   ))}
                </div>
-               <div className="p-3 border-t border-black bg-black/40 flex justify-between items-center px-6">
+               <div 
+                  className={`p-3 border-t border-black bg-black/40 flex justify-between items-center px-6 transition-colors ${dragOverTrackId === 'NEW' ? 'bg-orange-500/20' : ''}`}
+                  onDragOver={(e) => { e.preventDefault(); setDragOverTrackId('NEW'); }}
+                  onDragLeave={() => setDragOverTrackId(null)}
+                  onDrop={(e) => handleDrop(e)}
+               >
                   <div className="flex gap-4">
                      <button onClick={() => addTrack('sampler', 'New Sampler')} className="text-[9px] font-black bg-white/5 px-4 py-2 rounded border border-white/5 hover:bg-white/10 transition-all uppercase tracking-widest">+ Sampler</button>
                      <button onClick={() => addTrack('acid', 'New Acid')} className="text-[9px] font-black bg-blue-600/10 px-4 py-2 rounded border border-blue-500/20 hover:bg-blue-600/20 transition-all uppercase tracking-widest text-blue-400">+ Acid Synth</button>
                   </div>
                   <div className="flex items-center gap-4">
-                     <span className="text-[9px] font-black text-white/20 uppercase tracking-[0.2em]">Global Swing</span>
+                     <button 
+                        onClick={() => setShowGraphEditor(prev => !prev)} 
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded transition-all border ${showGraphEditor ? 'bg-orange-500/20 text-orange-400 border-orange-500/50' : 'bg-white/5 text-white/30 border-white/10 hover:text-white'}`}
+                     >
+                       <BarChart3 size={14} />
+                       <span className="text-[9px] font-black uppercase tracking-widest">Graph Editor</span>
+                     </button>
+                     <span className="text-[9px] font-black text-white/20 uppercase tracking-[0.2em] border-l border-white/10 pl-4">Global Swing</span>
                      <FruityKnob value={swing} min={0} max={1} onChange={setSwing} size={24} color="#fbbf24" label="Swing" />
                   </div>
                </div>
@@ -748,19 +1062,36 @@ export default function App() {
                         ))}
                      </div>
                   </div>
+                  {/* Timeline Ruler */}
+                  <div className="h-6 bg-[#1a1c20] border-b border-black flex relative z-40 ml-20 no-drag">
+                     {Array.from({ length: 4 }).map((_, bar) => (
+                       <div key={bar} className="flex-1 border-r border-white/10 relative">
+                          <div className="absolute top-1 left-1 text-[8px] font-black text-white/30">{bar + 1}</div>
+                          {Array.from({ length: 3 }).map((_, b) => (
+                             <div key={b} className="absolute h-2 w-px bg-white/5 bottom-0" style={{ left: `${(b + 1) * 25}%` }} />
+                          ))}
+                       </div>
+                     ))}
+                     <div 
+                        className="absolute top-0 bottom-0 w-px bg-orange-500 z-50 pointer-events-none transition-transform duration-75"
+                        style={{ transform: `translateX(${currentStep * 6.25}%)`, left: '0' }}
+                     />
+                  </div>
+
                   <div className="flex-1 overflow-hidden relative no-drag flex">
                      {/* Keys Column */}
                      <div 
                         ref={pianoKeysRef}
                         className="w-20 bg-[#141619] border-r border-black overflow-hidden flex-shrink-0 z-[60] flex flex-col"
                      >
-                        {PIANO_ROLL_NOTES.map(note => {
+                        {PIANO_ROLL_NOTES.map((note, idx) => {
                            const isBlack = note.includes('#');
+                           const isHovered = hoveredNoteIndex === idx;
                            return (
                               <button 
                                  key={note} 
                                  onMouseDown={() => triggerPreview(note)}
-                                 className={`h-7 w-full border-b border-black/30 flex items-center justify-end pr-2 text-[8px] font-black transition-all flex-shrink-0 active:text-orange-500 ${isBlack ? 'bg-black text-white/30 hover:text-white' : 'bg-[#1c1e22] text-white/50 hover:bg-[#2d3238] hover:text-white'}`}
+                                 className={`h-7 w-full border-b border-black/30 flex items-center justify-end pr-2 text-[8px] font-black transition-all flex-shrink-0 active:text-orange-500 ${isHovered ? 'bg-orange-500/40 text-white' : (isBlack ? 'bg-black text-white/30 hover:text-white' : 'bg-[#1c1e22] text-white/50 hover:bg-[#2d3238] hover:text-white')}`}
                               >
                                  {note}
                               </button>
@@ -779,19 +1110,20 @@ export default function App() {
                         <div className="absolute top-0 bottom-0 pointer-events-none transition-transform duration-75 z-[70] bg-white/5 border-l border-white/30 w-[6.25%]" 
                              style={{ transform: `translateX(${currentStep * 100}% )`, left: '0px' }} />
 
-                        <div className="absolute inset-0 pointer-events-none z-40">
+                        <div className="absolute inset-0 pointer-events-none z-50">
                            {selectedTrack.patterns[currentPatternId]?.notes.map(note => {
                               const noteIndex = PIANO_ROLL_NOTES.indexOf(note.note);
                               if (noteIndex === -1) return null;
                               return (
                                 <div key={note.id} 
-                                     className="absolute h-[27px] rounded-sm border-t border-l border-white/30 flex items-center justify-start pl-1 overflow-hidden pointer-events-auto cursor-pointer shadow-lg active:scale-95 transition-transform"
-                                     style={{ top: noteIndex * 28 + 1, left: `${(note.step / 16) * 100}%`, width: `${(durationToSteps(note.length) / 16) * 100}%`, backgroundColor: selectedTrack.color }}
-                                     onMouseDown={(e) => { 
-                                       e.stopPropagation(); 
-                                       setSelectedNoteId(note.id); 
-                                       triggerPreview(note.note);
+                                     className="absolute h-[27px] rounded-[3px] border border-black/20 overflow-hidden pointer-events-auto shadow-md group/note"
+                                     style={{ 
+                                       top: noteIndex * 28 + 1, 
+                                       left: `${(note.step / 16) * 100}%`, 
+                                       width: `${(durationToSteps(note.length) / 16) * 100}%`, 
+                                       backgroundColor: selectedTrack.color 
                                      }}
+                                     onMouseDown={(e) => initPianoDrag(e, 'move', note)}
                                      onContextMenu={(e) => {
                                         e.preventDefault();
                                         e.stopPropagation();
@@ -811,14 +1143,28 @@ export default function App() {
                                         }));
                                      }}
                                 >
-                                   <span className="text-[6px] font-black text-black/50 truncate uppercase select-none">{note.note}</span>
+                                   <div className="absolute inset-0 bg-gradient-to-b from-white/20 to-black/10" />
+                                   <div className="absolute inset-0 flex items-center px-1">
+                                      <span className="text-[7px] font-black text-black/60 truncate uppercase select-none drop-shadow-sm">{note.note}</span>
+                                   </div>
+                                   {/* Resize Handle */}
+                                   <div 
+                                      className="absolute right-0 top-0 bottom-0 w-2 cursor-e-resize hover:bg-white/30 flex items-center justify-center transition-colors"
+                                      onMouseDown={(e) => initPianoDrag(e, 'resize', note)}
+                                   >
+                                      <div className="w-[1px] h-3 bg-black/20" />
+                                   </div>
                                 </div>
                               );
                            })}
                         </div>
 
-                        {PIANO_ROLL_NOTES.map((note) => (
-                          <div key={note} className="h-7 flex border-b border-white/5 relative group">
+                        {PIANO_ROLL_NOTES.map((note, idx) => (
+                          <div key={note} 
+                               className="h-7 flex border-b border-white/5 relative group hover:bg-white/[0.02]"
+                               onMouseEnter={() => setHoveredNoteIndex(idx)}
+                               onMouseLeave={() => setHoveredNoteIndex(null)}
+                          >
                              {Array.from({ length: 16 }).map((_, step) => (
                                <div 
                                  key={step} 
@@ -828,8 +1174,10 @@ export default function App() {
                                    const newNote: PianoNote = { id: newId, note, step, velocity: 0.8, length: stepsToDuration(brushLength) };
                                    setTracks(p => p.map(t => t.id === selectedTrack.id ? { ...t, patterns: { ...t.patterns, [currentPatternId]: { ...t.patterns[currentPatternId], notes: [...t.patterns[currentPatternId].notes, newNote] } } } : t));
                                  }}
-                                 className="flex-1 border-r border-black/10 cursor-crosshair relative z-20 hover:bg-orange-500/10 transition-colors"
-                               />
+                                 className={`flex-1 border-r border-black/10 cursor-crosshair relative z-20 hover:bg-white/10 transition-colors ${step % 4 === 0 ? 'border-l border-l-white/10' : ''}`}
+                               >
+                                  {step % 4 === 0 && <div className="absolute left-0 top-0 bottom-0 w-px bg-white/5 pointer-events-none" />}
+                               </div>
                              ))}
                           </div>
                         ))}
@@ -879,8 +1227,20 @@ export default function App() {
 
              <div className="p-4 bg-black/20 border-t border-black">
                 <div className="flex gap-2">
-                   <input type="text" placeholder="Ask Gemini..." className="flex-1 bg-black/40 border border-white/5 rounded px-3 py-2.5 text-[11px] text-white focus:outline-none focus:border-orange-500/50 transition-all" />
-                   <button className="p-3 bg-orange-500 text-black rounded hover:bg-orange-400 transition-all shadow-lg active:scale-95">
+                   <input 
+                      type="text" 
+                      placeholder="Ask Gemini..." 
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      onKeyDown={(e) => {
+                         if (e.key === 'Enter') {
+                            handleMasteringReview(chatInput);
+                            setChatInput("");
+                         }
+                      }}
+                      className="flex-1 bg-black/40 border border-white/5 rounded px-3 py-2.5 text-[11px] text-white focus:outline-none focus:border-orange-500/50 transition-all" 
+                   />
+                   <button onClick={() => { handleMasteringReview(chatInput); setChatInput(""); }} className="p-3 bg-orange-500 text-black rounded hover:bg-orange-400 transition-all shadow-lg active:scale-95">
                       <ChevronRight size={18} />
                    </button>
                 </div>

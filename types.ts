@@ -42,6 +42,7 @@ export interface PatternData {
   id: number;
   name: string;
   steps: boolean[];
+  velocities: number[];
   notes: PianoNote[];
   color: string;
 }
@@ -58,6 +59,7 @@ export interface Track {
   volume: number; 
   pan: number; 
   muted: boolean;
+  solo: boolean;
   color: string;
   mixerTrack: number;
 }
